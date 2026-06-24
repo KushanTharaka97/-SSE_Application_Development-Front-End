@@ -55,27 +55,47 @@ function DocumentEditor({ document, canEdit, onSaved, onError }) {
     return <div><div><strong>{document.name}</strong><small>{pretty(document.type)} - {document.fileName || document.documentReference}</small></div><div className="document-actions"><StatusBadge value={document.verificationStatus} /><Button variant="ghost" onClick={openFile} loading={busy === 'view'} disabled={Boolean(busy)}><Eye size={16} />View</Button><Button variant="ghost" onClick={downloadFile} loading={busy === 'download'} disabled={Boolean(busy)}><Download size={16} />Download</Button>{canEdit && <Button variant="ghost" onClick={startEditing} loading={busy === 'edit'} disabled={Boolean(busy)}>Edit</Button>}</div></div>
   }
   return <div className="document-edit"><Field label="Name"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Type"><select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>{DOCUMENT_TYPES.map((type) => <option key={type} value={type}>{pretty(type)}</option>)}</select></Field><Field label="Uploaded file"><input value={form.fileName || form.documentReference} readOnly /></Field><Field label="Verification"><select value={form.verificationStatus} onChange={(e) => setForm({ ...form, verificationStatus: e.target.value })}>{VERIFICATION_STATUSES.map((status) => <option key={status} value={status}>{pretty(status)}</option>)}</select></Field><div className="document-actions"><Button variant="secondary" onClick={() => setEditing(false)} disabled={Boolean(busy)}>Cancel</Button><Button loading={busy === 'save'} disabled={Boolean(busy) && busy !== 'save'} onClick={save}>Save</Button></div></div>
-  if (!editing) return <div><div><strong>{document.name}</strong><small>{pretty(document.type)} · Ref: {document.documentReference}</small></div><div className="document-actions"><StatusBadge value={document.verificationStatus} /><Button variant="ghost" onClick={async () => { const current = await documentApi.get(document.id); setForm(current); setEditing(true) }}>Edit</Button></div></div>
-  return <div className="document-edit"><Field label="Name"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Type"><select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>{DOCUMENT_TYPES.map((type) => <option key={type} value={type}>{pretty(type)}</option>)}</select></Field><Field label="Reference"><input value={form.documentReference} onChange={(e) => setForm({ ...form, documentReference: e.target.value })} /></Field><Field label="Verification"><select value={form.verificationStatus} onChange={(e) => setForm({ ...form, verificationStatus: e.target.value })}>{VERIFICATION_STATUSES.map((status) => <option key={status} value={status}>{pretty(status)}</option>)}</select></Field><div className="document-actions"><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button><Button loading={busy} onClick={save}>Save</Button></div></div>
 }
 
 function RequestDetail({ request, role, onClose, onChanged }) {
   const [data, setData] = useState(request); const [draft, setDraft] = useState(request); const [citizenProfile, setCitizenProfile] = useState(null); const [documents, setDocuments] = useState([]); const [history, setHistory] = useState([]); const [error, setError] = useState(''); const [upload, setUpload] = useState(false); const agent = role === ROLES.SERVICE_AGENT; const admin = role === ROLES.ADMIN; const canReview = agent || admin
   useEffect(() => {
     let active = true
-    Promise.all([
-      requestApi.get(request.id),
-      requestApi.documents(request.id),
-      agent ? requestApi.history(request.id) : Promise.resolve([]),
-      agent ? citizenApi.get(request.citizenId) : Promise.resolve(null),
-    ]).then(([value, docs, events, profile]) => {
-      if (!active) return
-      setData(value); setDraft(value); setDocuments(docs); setHistory(events); setCitizenProfile(profile)
-    }).catch((e) => { if (active) setError(e.message) })
+    const loadDetail = async () => {
+      try {
+        const value = await requestApi.get(request.id)
+        if (!active) return
+
+        setData(value)
+        setDraft(value)
+
+        const [docsResult, historyResult, profileResult] = await Promise.allSettled([
+          requestApi.documents(request.id),
+          agent ? requestApi.history(request.id) : Promise.resolve([]),
+          agent ? citizenApi.get(value.citizenId) : Promise.resolve(null),
+        ])
+
+        if (!active) return
+
+        if (docsResult.status === 'fulfilled') setDocuments(docsResult.value)
+        else setError(docsResult.reason.message)
+
+        if (historyResult.status === 'fulfilled') setHistory(historyResult.value)
+        else setError(historyResult.reason.message)
+
+        if (profileResult.status === 'fulfilled') setCitizenProfile(profileResult.value)
+        else setError(profileResult.reason.message)
+      } catch (e) {
+        if (active) setError(e.message)
+      }
+    }
+
+    loadDetail()
     return () => { active = false }
-  }, [request.id, request.citizenId, agent])
+  }, [request.id, agent])
   const changeStatus = async (status) => { try { const updated = await requestApi.updateStatus(data.id, status); setData(updated); onChanged() } catch (e) { setError(e.message) } }
   const saveDetails = async () => { try { const updated = await requestApi.update(data.id, { serviceType: draft.serviceType, description: draft.description, citizenId: data.citizenId }); setData(updated); setDraft(updated); onChanged() } catch (e) { setError(e.message) } }
+  const historyLabel = (event) => event.previousStatus ? `${pretty(event.previousStatus)} to ${pretty(event.newStatus)}` : `Created as ${pretty(event.newStatus)}`
   return <Modal wide title={`Request REQ-${String(data.id).padStart(5, '0')}`} description={pretty(data.serviceType)} onClose={onClose}>{error && <Alert onClose={() => setError('')}>{error}</Alert>}
     <div className="detail-grid"><div><span className="detail-label">Status</span><StatusBadge value={data.status} /></div><div><span className="detail-label">Citizen</span><strong>{data.citizenName || `Citizen #${data.citizenId}`}</strong></div><div><span className="detail-label">Submitted</span><strong>{formatDate(data.createdDate)}</strong></div></div>
     {agent && citizenProfile && <div className="detail-section"><h3>Citizen contact</h3><p>{citizenProfile.email} - {citizenProfile.mobile}<br />{citizenProfile.address}</p></div>}
@@ -83,18 +103,8 @@ function RequestDetail({ request, role, onClose, onChanged }) {
     {canReview && <div className="detail-section"><h3>Process request</h3><div className="inline-controls"><select aria-label="New request status" value={data.status} onChange={(e) => changeStatus(e.target.value)}>{REQUEST_STATUSES.filter((status) => status !== 'CANCELLED').map((status) => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>}
     {role === ROLES.CITIZEN && <div className="detail-section"><Button onClick={() => setUpload(true)}><FileUp size={17} />Upload supporting document</Button></div>}
     <div className="detail-section"><h3>Supporting documents</h3>{!documents.length ? <p className="muted">No documents attached.</p> : <div className="document-list">{documents.map((doc) => <DocumentEditor key={doc.id} document={doc} canEdit={agent} onError={setError} onSaved={(updated) => setDocuments((all) => all.map((item) => item.id === updated.id ? updated : item))} />)}</div>}</div>
-    {agent && <div className="detail-section"><h3>Status history</h3>{!history.length ? <p className="muted">No status changes recorded.</p> : <ol className="timeline">{history.map((event) => <li key={event.id}><span /><div><strong>{pretty(event.previousStatus)} to {pretty(event.newStatus)}</strong><small>{formatDate(event.changedAt)} by {event.changedBy}</small></div></li>)}</ol>}</div>}
+    {agent && <div className="detail-section"><h3>Status history</h3>{!history.length ? <p className="muted">No status changes recorded.</p> : <ol className="timeline">{history.map((event) => <li key={event.id}><span /><div><strong>{historyLabel(event)}</strong><small>{formatDate(event.changedAt)} by {event.changedBy}</small></div></li>)}</ol>}</div>}
     {upload && <Modal title="Upload supporting document" description={`Attach a file to request #${data.id}`} onClose={() => setUpload(false)}><UploadForm requestId={data.id} onClose={() => setUpload(false)} onUploaded={(created) => setDocuments((all) => [...all, created])} /></Modal>}
-  </Modal>
-  return <Modal wide title={`Request REQ-${String(data.id).padStart(5, '0')}`} description={pretty(data.serviceType)} onClose={onClose}>{error && <Alert onClose={() => setError('')}>{error}</Alert>}
-    <div className="detail-grid"><div><span className="detail-label">Status</span><StatusBadge value={data.status} /></div><div><span className="detail-label">Citizen</span><strong>{data.citizenName || `Citizen #${data.citizenId}`}</strong></div><div><span className="detail-label">Submitted</span><strong>{formatDate(data.createdDate)}</strong></div></div>
-    {agent && citizenProfile && <div className="detail-section"><h3>Citizen contact</h3><p>{citizenProfile.email} · {citizenProfile.mobile}<br />{citizenProfile.address}</p></div>}
-    {(agent || role === ROLES.ADMIN) ? <div className="detail-section"><h3>Request details</h3><div className="form-grid"><Field label="Service type"><select value={draft.serviceType} onChange={(e) => setDraft({ ...draft, serviceType: e.target.value })}>{SERVICE_TYPES.map((type) => <option key={type} value={type}>{pretty(type)}</option>)}</select></Field><Field label="Description"><textarea rows="3" maxLength="1000" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></Field><div className="form-actions span-2"><Button variant="secondary" onClick={saveDetails}>Save details</Button></div></div></div> : <div className="detail-section"><h3>Description</h3><p>{data.description}</p></div>}
-    {(agent || role === ROLES.ADMIN) && <div className="detail-section"><h3>Process request</h3><div className="inline-controls"><select aria-label="New request status" value={data.status} onChange={(e) => changeStatus(e.target.value)}>{REQUEST_STATUSES.filter((s) => s !== 'CANCELLED').map((status) => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>}
-    {role === ROLES.CITIZEN && <div className="detail-section"><Button onClick={() => setUpload(true)}><FileUp size={17} />Upload supporting document</Button></div>}
-    {agent && <><div className="detail-section"><h3>Supporting documents</h3>{!documents.length ? <p className="muted">No documents attached.</p> : <div className="document-list">{documents.map((doc) => <DocumentEditor key={doc.id} document={doc} onSaved={(updated) => setDocuments((all) => all.map((item) => item.id === updated.id ? updated : item))} />)}</div>}</div>
-      <div className="detail-section"><h3>Status history</h3>{!history.length ? <p className="muted">No status changes recorded.</p> : <ol className="timeline">{history.map((event) => <li key={event.id}><span /><div><strong>{pretty(event.previousStatus)} → {pretty(event.newStatus)}</strong><small>{formatDate(event.changedAt)} by {event.changedBy}</small></div></li>)}</ol>}</div></>}
-    {upload && <Modal title="Upload supporting document" description={`Attach a file to request #${data.id}`} onClose={() => setUpload(false)}><UploadForm requestId={data.id} onClose={() => setUpload(false)} /></Modal>}
   </Modal>
 }
 

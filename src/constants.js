@@ -5,5 +5,8 @@ export const DOCUMENT_TYPES = ['IDENTIFICATION', 'PROOF_OF_ADDRESS', 'SUPPORTING
 export const VERIFICATION_STATUSES = ['PENDING', 'VERIFIED', 'REJECTED']
 export const CITIZEN_STATUSES = ['ACTIVE', 'INACTIVE', 'PENDING_VERIFICATION']
 
-export const pretty = (value = '') => value.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+export const pretty = (value = '') => {
+  const normalized = value == null ? '' : String(value)
+  return normalized.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
 export const formatDate = (value) => value ? new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—'
